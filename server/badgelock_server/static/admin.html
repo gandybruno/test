@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BadgeLock – Administration</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#6b7385; --line:#e2e5ea; --accent:#2f6fde; --ok:#1e8e4f; --bad:#c23b3b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2128; --text:#e6e8ec; --muted:#9097a3; --line:#2d323b; --accent:#6b9bf0; --ok:#4cc27f; --bad:#e86b6b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); background:var(--card); }
+  h1 { font-size:18px; margin:0; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  input[type=text] { width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--text); }
+  button { padding:5px 10px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .muted { color:var(--muted); } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  code { font-size:12px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<header><h1>BadgeLock – Administration</h1></header>
+<main>
+  <section>
+    <h2>Postes</h2>
+    <div class="scroll"><table id="pcs"></table></div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="new-pc" placeholder="Nom du poste (ex. PC-COMPTA-01)" style="max-width:280px">
+      <input type="text" id="new-pc-desc" placeholder="Description" style="max-width:280px">
+      <button class="primary" onclick="addPc()">Ajouter le poste</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Groupes de postes</h2>
+    <div class="scroll"><table id="groups"></table></div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="new-group" placeholder="Nom du groupe" style="max-width:200px">
+      <input type="text" id="new-group-members" placeholder="Postes, séparés par des virgules" style="max-width:400px">
+      <button class="primary" onclick="saveGroup(val('new-group'), val('new-group-members'))">Enregistrer</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Badges autorisés</h2>
+    <div class="scroll"><table id="badges"></table></div>
+    <h2 style="margin-top:16px">Badges inconnus passés récemment</h2>
+    <div class="scroll"><table id="unknown"></table></div>
+  </section>
+
+  <section>
+    <h2>Journal</h2>
+    <div class="scroll"><table id="events"></table></div>
+  </section>
+</main>
+<script>
+let config = {badges:{}, pcs:{}, groups:{}}, statusData = {online:{}, unknown_badges:[]};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const val = id => document.getElementById(id).value.trim();
+const list = s => s.split(",").map(x => x.trim()).filter(Boolean);
+const fmt = t => new Date(t * 1000).toLocaleString("fr-FR");
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
+  if (!r.ok) { alert((await r.json().catch(() => ({}))).detail || r.statusText); throw new Error(r.status); }
+  return r.json();
+}
+
+async function refresh() {
+  [config, statusData] = await Promise.all([api("GET", "/api/config"), api("GET", "/api/status")]);
+  const events = await api("GET", "/api/events?limit=50");
+  renderPcs(); renderGroups(); renderBadges(); renderUnknown(); renderEvents(events);
+}
+
+function renderPcs() {
+  const rows = Object.entries(config.pcs).map(([name, pc]) => {
+    const st = statusData.online[name];
+    const state = !st ? '<span class="muted">hors ligne</span>' : st.locked ? '<span class="bad">verrouillé</span>' : '<span class="ok">déverrouillé</span>';
+    return `<tr><td><b>${esc(name)}</b><br><span class="muted">${esc(pc.description)}</span></td><td>${state}</td>
+      <td><code>${esc(pc.token)}</code></td>
+      <td class="row"><button onclick="cmd('${esc(name)}','lock')">Verrouiller</button><button onclick="cmd('${esc(name)}','unlock')">Déverrouiller</button>
+      <button onclick="regen('${esc(name)}')">Nouveau jeton</button><button onclick="delPc('${esc(name)}')">Supprimer</button></td></tr>`;
+  }).join("");
+  document.getElementById("pcs").innerHTML = `<tr><th>Poste</th><th>État</th><th>Jeton de l'agent</th><th></th></tr>${rows}`;
+}
+
+function renderGroups() {
+  const rows = Object.entries(config.groups).map(([name, members]) =>
+    `<tr><td><b>${esc(name)}</b></td><td>${members.map(esc).join(", ")}</td>
+     <td class="row"><button onclick="editGroup('${esc(name)}')">Modifier</button><button onclick="delGroup('${esc(name)}')">Supprimer</button></td></tr>`).join("");
+  document.getElementById("groups").innerHTML = `<tr><th>Groupe</th><th>Postes</th><th></th></tr>${rows}`;
+}
+
+function badgeRow(uid, b, isNew) {
+  const id = "b-" + uid;
+  return `<tr id="${esc(id)}"><td><code>${esc(uid)}</code></td>
+    <td><input type="text" data-f="name" value="${esc(b.name)}"></td>
+    <td><input type="text" data-f="pcs" value="${esc(b.pcs.join(", "))}" placeholder="PC-01, PC-02"></td>
+    <td><input type="text" data-f="groups" value="${esc(b.groups.join(", "))}" placeholder="compta"></td>
+    <td><label><input type="checkbox" data-f="can_lock" ${b.can_lock ? "checked" : ""}> verrouille</label><br>
+        <label><input type="checkbox" data-f="can_unlock" ${b.can_unlock ? "checked" : ""}> déverrouille</label><br>
+        <label><input type="checkbox" data-f="enabled" ${b.enabled ? "checked" : ""}> actif</label></td>
+    <td class="row"><button class="primary" onclick="saveBadge('${esc(uid)}')">${isNew ? "Autoriser" : "Enregistrer"}</button>
+      ${isNew ? "" : `<button onclick="delBadge('${esc(uid)}')">Supprimer</button>`}</td></tr>`;
+}
+
+function renderBadges() {
+  const head = "<tr><th>Badge</th><th>Nom</th><th>Postes</th><th>Groupes</th><th>Droits</th><th></th></tr>";
+  const rows = Object.entries(config.badges).map(([uid, b]) => badgeRow(uid, b, false)).join("");
+  const blank = {name:"", pcs:[], groups:[], can_lock:true, can_unlock:true, enabled:true};
+  const add = `<tr><td colspan="6" class="row"><input type="text" id="new-uid" placeholder="Identifiant du badge" style="max-width:220px">
+    <button onclick="addBadge()">Ajouter manuellement</button></td></tr>`;
+  document.getElementById("badges").innerHTML = head + rows + add;
+  window.blankBadge = blank;
+}
+
+function renderUnknown() {
+  const head = "<tr><th>Badge</th><th>Nom</th><th>Postes</th><th>Groupes</th><th>Droits</th><th></th></tr>";
+  const rows = statusData.unknown_badges.map(u =>
+    badgeRow(u.uid, {...window.blankBadge, pcs:[u.reader]}, true).replace("<td><code>", `<td><span class="muted">${fmt(u.time)} sur ${esc(u.reader)}</span><br><code>`)).join("");
+  document.getElementById("unknown").innerHTML = rows ? head + rows : '<tr><td class="muted">Aucun. Passez un badge sur un lecteur pour le voir apparaître ici.</td></tr>';
+}
+
+function renderEvents(events) {
+  const rows = events.map(e => {
+    let text = "";
+    if (e.kind === "badge") text = `${e.allowed ? "✅" : "⛔"} badge <code>${esc(e.uid)}</code> ${esc(e.badge || "")} sur ${esc(e.reader)} : ${esc(e.reason)}${e.targets?.length ? " → " + e.targets.map(esc).join(", ") : ""}`;
+    else if (e.kind === "result") text = `${e.ok ? "✅" : "⚠️"} ${esc(e.pc)} : ${esc(e.action)} ${esc(e.message || "")}`;
+    else text = `${esc(e.kind)} ${esc(e.pc || "")}`;
+    return `<tr><td class="muted" style="white-space:nowrap">${fmt(e.time)}</td><td>${text}</td></tr>`;
+  }).join("");
+  document.getElementById("events").innerHTML = rows || '<tr><td class="muted">Aucun événement.</td></tr>';
+}
+
+async function saveBadge(uid) {
+  const row = document.getElementById("b-" + uid);
+  const f = n => row.querySelector(`[data-f="${n}"]`);
+  await api("PUT", "/api/badges/" + encodeURIComponent(uid), {
+    name: f("name").value.trim() || uid, pcs: list(f("pcs").value), groups: list(f("groups").value),
+    can_lock: f("can_lock").checked, can_unlock: f("can_unlock").checked, enabled: f("enabled").checked});
+  refresh();
+}
+function addBadge() {
+  const uid = val("new-uid"); if (!uid) return;
+  config.badges[uid] = {...window.blankBadge, name: uid}; saveBadge(uid);
+}
+async function delBadge(uid) { if (confirm("Supprimer le badge " + uid + " ?")) { await api("DELETE", "/api/badges/" + encodeURIComponent(uid)); refresh(); } }
+async function addPc() { const n = val("new-pc"); if (!n) return; await api("PUT", "/api/pcs/" + encodeURIComponent(n), {description: val("new-pc-desc")}); refresh(); }
+async function regen(n) { if (confirm("Générer un nouveau jeton ? L'agent devra être reconfiguré.")) { await api("PUT", "/api/pcs/" + encodeURIComponent(n), {description: config.pcs[n].description, regenerate_token: true}); refresh(); } }
+async function delPc(n) { if (confirm("Supprimer le poste " + n + " ?")) { await api("DELETE", "/api/pcs/" + encodeURIComponent(n)); refresh(); } }
+async function cmd(n, action) { await api("POST", `/api/pcs/${encodeURIComponent(n)}/command`, {action}); setTimeout(refresh, 800); }
+async function saveGroup(n, members) { if (!n) return; await api("PUT", "/api/groups/" + encodeURIComponent(n), {members: list(members)}); refresh(); }
+function editGroup(n) { const m = prompt("Postes du groupe " + n + " (séparés par des virgules)", config.groups[n].join(", ")); if (m !== null) saveGroup(n, m); }
+async function delGroup(n) { if (confirm("Supprimer le groupe " + n + " ?")) { await api("DELETE", "/api/groups/" + encodeURIComponent(n)); refresh(); } }
+
+refresh();
+// Rafraîchit l'état et le journal, sans écraser une saisie en cours.
+setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== "INPUT") refresh(); }, 5000);
+</script>
+</body>
+</html>
